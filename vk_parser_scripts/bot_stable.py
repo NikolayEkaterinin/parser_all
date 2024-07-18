@@ -70,6 +70,126 @@ def collect_user_groups(message: Message):
     bot.register_next_step_handler(msg, request_group_info)
 
 
+# Комментирование постов
+comments_list = [
+    "Отличный пост!",
+    "Очень полезная информация, спасибо!",
+    "Интересно, спасибо за пост!"
+]
+
+
+def get_random_comment():
+    return random.choice(comments_list)
+
+
+def comment_post(chat_id, driver, link):
+    try:
+        driver.get(link)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located(
+            (By.XPATH, "//div[contains(@class, '_post_content')]")))
+
+        # Функция для прокрутки страницы до тех пор, пока не появятся посты
+        def scroll_until_posts_found(max_attempts=3):
+            attempt = 0
+            while attempt < max_attempts:
+                post_contents = driver.find_elements(
+                    By.XPATH, "//div[contains(@class, '_post_content')]")
+
+                if post_contents:
+                    return post_contents
+
+                # Прокрутка страницы и ожидание загрузки контента
+                driver.execute_script(
+                    "window.scrollTo(0, document.body.scrollHeight);")
+                # Подождите, чтобы дать время для загрузки новых постов
+                time.sleep(3)
+                attempt += 1
+
+            return []
+
+        post_contents = scroll_until_posts_found()
+
+        # Если посты не найдены после попыток прокрутки
+        if not post_contents:
+            bot.send_message(
+                chat_id, f"Не удалось найти посты на странице: {link}")
+            return
+
+        for post_content in post_contents:
+            try:
+                # Проверка наличия кнопки комментирования
+                comment_icon = post_content.find_element(
+                    By.XPATH, ".//span[contains(@class, 'PostBottomAction__icon _comment_button_icon')]")
+
+                # Проверка наличия и состояния кнопки
+                if not comment_icon.is_displayed() or not comment_icon.is_enabled():
+                    print("Иконка комментирования недоступна для клика, пропускаем.")
+                    continue
+
+                # Клик по кнопке комментирования
+                driver.execute_script("arguments[0].click();", comment_icon)
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located(
+                    (By.XPATH, "//div[contains(@class, 'reply_field submit_post_field')]")))
+
+                # Найти поле ввода комментария и отправить комментарий
+                comment_field = post_content.find_element(
+                    By.XPATH, ".//div[contains(@class, 'reply_field submit_post_field')]")
+                comment_field.click()
+                comment_field.send_keys(get_random_comment())
+
+                # Найти и кликнуть кнопку отправки
+                submit_button = post_content.find_element(
+                    By.XPATH, ".//button[contains(@class, 'reply_send_button')]")
+                driver.execute_script("arguments[0].click();", submit_button)
+
+                bot.send_message(
+                    chat_id, f"Комментарий поставлен на посте: {link}")
+                # Дайте время для выполнения действия
+                time.sleep(random.randint(5, 15))
+
+            except Exception as e:
+                print(f"Ошибка при попытке комментирования поста: {e}")
+                bot.send_message(
+                    chat_id, f"Ошибка при попытке комментирования поста: {e}")
+
+    except Exception as e:
+        error_message = f"Ошибка при обработке страницы {link}: {e}\n{traceback.format_exc()}"
+        print(error_message)
+        bot.send_message(chat_id, error_message)
+
+    finally:
+        driver.quit()
+
+
+def process_comments(chat_id, driver):
+    conn = sqlite3.connect('vk_db.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT group_link FROM comment_group')
+    groups = cursor.fetchall()
+    conn.close()
+
+    for group in groups:
+        comment_post(chat_id, driver, group[0])
+
+
+def create_comment_group_table(db_path='vk_db.db'):
+    try:
+        # Подключение к базе данных
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            # Создание таблицы, если она не существует
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS comment_group (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_link TEXT NOT NULL
+                )
+            ''')
+            conn.commit()
+        print("Таблица comment_group успешно создана или уже существует.")
+    except sqlite3.Error as e:
+        print(f"Ошибка при работе с базой данных: {e}")
+
+
 def create_table(group_id):
     conn = create_connection()
     cursor = conn.cursor()
@@ -173,6 +293,8 @@ def handle_command(message: Message, driver, user_id):
         request_group_info(message)
     elif command == "Расставить лайки":
         show_tables(message, driver)  # Передаем driver в show_tables
+    elif command == "Расставить комментарии":
+        process_comments(message, driver)
     else:
         bot.send_message(
             chat_id, "Неверная команда. Пожалуйста, выберите правильное действие.")
@@ -459,7 +581,7 @@ def like_posts(selected_table, chat_id, conn, driver):
 
 def vk_login(
     login, vk_id, chat_id, bot, driver_path=DRIVER_PATH, binary_location=BINARY_LOCATION
-):
+    ):
     # Настройки для Yandex Browser
     options = Options()
     options.binary_location = binary_location
