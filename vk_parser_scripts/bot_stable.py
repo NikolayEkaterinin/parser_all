@@ -1,5 +1,6 @@
 import os
 import sqlite3
+# Импорт зависимостей из Selenium
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -16,6 +17,9 @@ import re
 import random
 import requests
 from dotenv import load_dotenv
+# Импорт библиотеки по решению капчи
+from vk_captcha import VkCaptchaSolver
+
 
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOCKEN")
@@ -473,6 +477,34 @@ def handle_table_selection(message: Message, driver):
         conn.close()
 
 
+# Функция решения капчи
+def solve_captcha(driver, bot, chat_id):
+    try:
+        bot.send_message(chat_id, "Мы столкнулись с капчей!")
+        solver = VkCaptchaSolver(logging=True)
+        captcha_image = driver.find_element(
+            By.XPATH, "//div[@class='vkuiImageBase']//img[@alt='Графический код']")
+        captcha_url = captcha_image.get_attribute('src')
+
+        answer, accuracy = solver.solve(
+            url=captcha_url, minimum_accuracy=0.4, repeat_count=10)
+        print(f"Captcha solved: {answer} with accuracy {accuracy:.4}")
+
+        captcha_input = driver.find_element(
+            By.XPATH, "//input[@class='vkuiTypography vkuiInput__el vkuiText vkuiText--sizeY-compact']")
+        captcha_input.send_keys(answer)
+
+        submit_button = driver.find_element(
+            By.XPATH, "//button[@class='Button-module__root--enpNU vkuiButton vkuiButton--size-l vkuiButton--mode-primary vkuiButton--appearance-accent vkuiButton--align-center vkuiButton--stretched vkuiTappable vkuiInternalTappable vkuiTappable--hasHover vkui-focus-visible']")
+        submit_button.click()
+
+        bot.send_message(chat_id, "Я смог её решить, работаем дальше!")
+    except Exception as e:
+        print(f"Error solving captcha: {e}")
+        bot.send_message(chat_id, f"Ошибка при решении капчи: {e}")
+
+
+# Функий расстановки лайков на пост
 def like_posts(selected_table, chat_id, conn, driver):
     try:
         existing_links = get_existing_links(selected_table, conn)
@@ -489,78 +521,86 @@ def like_posts(selected_table, chat_id, conn, driver):
                 if liked:
                     continue
 
-                try:
-                    current_time = datetime.now()
+                while True:  # Добавляем цикл для повторных попыток после решения капчи
+                    try:
+                        current_time = datetime.now()
 
-                    # Проверка на лимит лайков в сессии
-                    if likes_in_session >= 500 and (current_time - start_time).seconds < 12 * 3600:
-                        next_session_start = start_time + timedelta(hours=12)
-                        sleep_time = (next_session_start -
-                                      current_time).seconds
-                        print(
-                            f"Лимит лайков достигнут. Спим {sleep_time} секунд до начала новой сессии.")
-                        bot.send_message(
-                            chat_id, f"Лимит лайков достигнут. Спим {sleep_time} секунд до начала новой сессии.")
-                        time.sleep(sleep_time)
-                        start_time = datetime.now()
-                        likes_in_session = 0
-                        last_pause_time = start_time
-
-                    driver.get(link)
-                    WebDriverWait(driver, 10).until(EC.presence_of_element_located(
-                        (By.XPATH, "//div[contains(@class, '_post_content')]")))
-
-                    post_contents = driver.find_elements(
-                        By.XPATH, "//div[contains(@class, '_post_content')]")
-
-                    if not post_contents:
-                        bot.send_message(
-                            chat_id, f"Не удалось найти посты на странице: {link}")
-                        continue
-
-                    liked_any_post = False
-                    for post_content in post_contents:
-                        try:
-                            like_icon = post_content.find_element(
-                                By.XPATH, ".//span[contains(@class, '_like_button_icon')]//div[contains(@class, 'PostButtonReactions__icon')]")
-                            like_icon_class = like_icon.get_attribute("class")
-                            print(f"Класс иконки лайка: {like_icon_class}")
-
-                            if "PostButtonReactions__icon--custom" in like_icon_class or "PostButtonReactions__icon--filled" in like_icon_class:
-                                print(
-                                    "Лайк уже поставлен на этом посте, пропускаем.")
-                                continue
-
-                            # Дополнительные проверки состояния кнопки
-                            if not like_icon.is_displayed() or not like_icon.is_enabled():
-                                print(
-                                    "Иконка лайка не доступна для клика, пропускаем.")
-                                continue
-
-                            # Попытка кликнуть через JavaScript
-                            driver.execute_script(
-                                "arguments[0].click();", like_icon)
-                            liked_any_post = True
-                            total_likes += 1
-                            likes_in_session += 1
-                            bot.send_message(
-                                chat_id, f"Лайк поставлен! Всего лайков: {total_likes}")
-                            time.sleep(random.randint(5, 15))
-
-                        except Exception as e:
+                        # Проверка на лимит лайков в сессии
+                        if likes_in_session >= 500 and (current_time - start_time).seconds < 12 * 3600:
+                            next_session_start = start_time + \
+                                timedelta(hours=12)
+                            sleep_time = (next_session_start -
+                                          current_time).seconds
                             print(
-                                f"Ошибка при попытке поставить лайк на посте: {e}")
+                                f"Лимит лайков достигнут. Спим {sleep_time} секунд до начала новой сессии.")
+                            bot.send_message(
+                                chat_id, f"Лимит лайков достигнут. Спим {sleep_time} секунд до начала новой сессии.")
+                            time.sleep(sleep_time)
+                            start_time = datetime.now()
+                            likes_in_session = 0
+                            last_pause_time = start_time
 
-                    if liked_any_post:
-                        update_link_like_status(selected_table, link, conn)
-                        bot.send_message(
-                            chat_id, f"Лайки поставлены на посты на странице: {link}")
-                    else:
-                        bot.send_message(
-                            chat_id, f"Лайки уже были поставлены ранее на странице: {link}")
+                        driver.get(link)
+                        WebDriverWait(driver, 10).until(EC.presence_of_element_located(
+                            (By.XPATH, "//div[contains(@class, '_post_content')]")))
 
-                except Exception as e:
-                    print(f"Ошибка при обработке страницы {link}: {e}")
+                        post_contents = driver.find_elements(
+                            By.XPATH, "//div[contains(@class, '_post_content')]")
+
+                        if not post_contents:
+                            bot.send_message(
+                                chat_id, f"Не удалось найти посты на странице: {link}")
+                            break  # Выход из цикла и переход к следующей ссылке
+
+                        liked_any_post = False
+                        for post_content in post_contents:
+                            try:
+                                like_icon = post_content.find_element(
+                                    By.XPATH, ".//span[contains(@class, '_like_button_icon')]//div[contains(@class, 'PostButtonReactions__icon')]")
+                                like_icon_class = like_icon.get_attribute(
+                                    "class")
+                                print(f"Класс иконки лайка: {like_icon_class}")
+
+                                if "PostButtonReactions__icon--custom" in like_icon_class or "PostButtonReactions__icon--filled" in like_icon_class:
+                                    print(
+                                        "Лайк уже поставлен на этом посте, пропускаем.")
+                                    continue
+
+                                # Дополнительные проверки состояния кнопки
+                                if not like_icon.is_displayed() or not like_icon.is_enabled():
+                                    print(
+                                        "Иконка лайка не доступна для клика, пропускаем.")
+                                    continue
+
+                                # Попытка кликнуть через JavaScript
+                                driver.execute_script(
+                                    "arguments[0].click();", like_icon)
+                                liked_any_post = True
+                                total_likes += 1
+                                likes_in_session += 1
+                                bot.send_message(
+                                    chat_id, f"Лайк поставлен! Всего лайков: {total_likes}")
+                                time.sleep(random.randint(5, 15))
+
+                            except Exception as e:
+                                print(
+                                    f"Ошибка при попытке поставить лайк на посте: {e}")
+
+                        if liked_any_post:
+                            update_link_like_status(selected_table, link, conn)
+                            bot.send_message(
+                                chat_id, f"Лайки поставлены на посты на странице: {link}")
+                        else:
+                            bot.send_message(
+                                chat_id, f"Лайки уже были поставлены ранее на странице: {link}")
+                        break  # Выход из цикла и переход к следующей ссылке
+
+                    except Exception as e:
+                        if "captcha" in str(e).lower():
+                            solve_captcha(driver, bot, chat_id)
+                        else:
+                            print(f"Ошибка при обработке страницы {link}: {e}")
+                            break  # Выход из цикла и переход к следующей ссылке
 
             bot.send_message(
                 chat_id, f"Расстановка лайков завершена. Всего поставлено лайков: {total_likes}")
@@ -579,9 +619,10 @@ def like_posts(selected_table, chat_id, conn, driver):
         bot.send_message(chat_id, error_message)
 
 
+# Основная функция входа на страницуы
 def vk_login(
     login, vk_id, chat_id, bot, driver_path=DRIVER_PATH, binary_location=BINARY_LOCATION
-    ):
+):
     # Настройки для Yandex Browser
     options = Options()
     options.binary_location = binary_location
