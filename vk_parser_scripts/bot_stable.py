@@ -41,7 +41,7 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 # Стартовая клавиатура
 main_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-buttons = [KeyboardButton(text="Регистрация"),
+buttons = [KeyboardButton(text="Залогиниться"),
            KeyboardButton(text="Собрать пользователей")]
 
 main_keyboard.add(*buttons)
@@ -54,9 +54,13 @@ def bot_start(message: Message):
         "Добрый день вы попали в бот по автолайкингу в VK",
         reply_markup=main_keyboard,
     )
+    bot.send_message(
+        message.chat.id, 'Для сбора пользователей нажмите кнопку "Собрать пользователей"')
+    bot.send_message(
+        message.chat.id, 'Для возможности расставить лайки или комментарии предварительно надо залогиниться')
 
 
-@bot.message_handler(func=lambda message: message.text == "Регистрация")
+@bot.message_handler(func=lambda message: message.text == "Залогиниться")
 def auto_like(message: Message):
     chat_id = message.chat.id
     user_data[chat_id] = {}
@@ -277,10 +281,9 @@ def process_next_command(message: Message, driver):
 
     # Создаем клавиатуру
     keyboard = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    button_group = KeyboardButton(text="Собрать пользователей")
     button_likes = KeyboardButton(text="Расставить лайки")
     button_comment = KeyboardButton(text="Расставить комментарии")
-    keyboard.add(button_group, button_likes, button_comment)
+    keyboard.add(button_likes, button_comment)
 
     # Отправляем сообщение с клавиатурой
     bot.send_message(chat_id, "Выберите действие:", reply_markup=keyboard)
@@ -293,9 +296,7 @@ def handle_command(message: Message, driver, user_id):
     chat_id = message.chat.id
     command = message.text
 
-    if command == "Собрать пользователей":
-        request_group_info(message)
-    elif command == "Расставить лайки":
+    if command == "Расставить лайки":
         show_tables(message, driver)  # Передаем driver в show_tables
     elif command == "Расставить комментарии":
         process_comments(message, driver)
@@ -641,9 +642,10 @@ def vk_login(
     try:
         # Загрузка страницы ВКонтакте
         driver.get(f"https://vk.com/{vk_id}/")
+        time.sleep(5)  # Пауза для полной загрузки страницы
 
         # Ожидание, пока кнопка входа станет видимой
-        wait = WebDriverWait(driver, 10)
+        wait = WebDriverWait(driver, 15)
         login_button = wait.until(
             EC.presence_of_element_located(
                 (
@@ -676,13 +678,13 @@ def vk_login(
                 )
             )
             submit_button.click()
-        except:
-            print("Не удалось найти кнопку Войти после ввода логина")
+        except Exception as e:
+            print(f"Не удалось найти кнопку Войти после ввода логина: {e}")
             driver.quit()
             return None
 
         print(f"login {login} input")
-        time.sleep(10)
+        time.sleep(10)  # Пауза после клика, чтобы страница успела обновиться
 
         # Проверка на необходимость ввода кода
         try:
@@ -695,8 +697,8 @@ def vk_login(
                 otp_text = otp_title.text
                 bot.send_message(chat_id, f"{otp_text}")
                 return driver
-        except:
-            print("Не требуется вводить код подтверждения")
+        except Exception as e:
+            print(f"Не требуется вводить код подтверждения: {e}")
             bot.send_message(
                 chat_id,
                 "Не требуется вводить код подтверждения. Проверяем необходимость ввода Пароля",
@@ -732,17 +734,20 @@ def check_password_field(driver, chat_id, bot):
 
 def enter_password(driver, password):
     wait = WebDriverWait(driver, 10)
+    success = True
 
-    # Найти элемент "Пароль" и ввести пароль
+    # Найти элемент "Пароль" и очистить его
     try:
         password_element = wait.until(
             EC.element_to_be_clickable(
                 (By.CSS_SELECTOR, "input[name='password']"))
         )
-        password_element.send_keys(password)
+        password_element.clear()  # Очистка поля ввода пароля
+        password_element.send_keys(password)  # Ввод нового пароля
         print("Введен пароль")
     except Exception as e:
         print(f"Ошибка при вводе пароля: {e}")
+        success = False
 
     # Нажатие на кнопку "Продолжить"
     try:
@@ -756,10 +761,14 @@ def enter_password(driver, password):
         print("Кликнули на кнопку 'Продолжить'")
     except Exception as e:
         print(f"Ошибка при нажатии кнопки 'Продолжить': {e}")
+        success = False
+
+    return success
 
 
 def process_vk_id_step(message: Message):
     chat_id = message.chat.id
+    bot.send_message(chat_id, "Ожидайте загрузки данных...")
     # Примерное значение, с которым продолжаем выполнение
     user_data[chat_id]["vk_id"] = 'feed'
 
@@ -787,6 +796,20 @@ def process_otp_step(message: Message, driver):
     otp_field.send_keys(otp_code)
 
     try:
+        # Ждем некоторое время, чтобы система успела проверить код
+        time.sleep(2)
+
+        # Проверка на наличие ошибки в поле ввода кода
+        error_message = driver.find_elements(
+            By.CSS_SELECTOR, ".vkc__CellInput__error")
+        if error_message:
+            bot.send_message(
+                chat_id, "Вы ввели неверный код. Пожалуйста, попробуйте еще раз.")
+            msg = bot.send_message(
+                chat_id, "Введите код для двухфакторной аутентификации:")
+            bot.register_next_step_handler(msg, process_otp_step, driver)
+            return
+
         # Ждем появления поля ввода пароля
         wait.until(
             EC.presence_of_element_located(
@@ -805,10 +828,24 @@ def process_password_step(message: Message, driver):
     password = message.text
 
     # Вызов функции для ввода пароля и нажатия кнопки "Продолжить"
-    enter_password(driver, password)
-    time.sleep(10)
-    # Переход к выбору дальнейшего действия
-    process_next_command(message, driver)
+    if enter_password(driver, password):
+        time.sleep(2)
+        # Проверка на наличие ошибки при вводе пароля
+        error_message = driver.find_elements(
+            By.CSS_SELECTOR, ".vkc__TextField__errorMessage")
+        if error_message:
+            bot.send_message(
+                chat_id, "Вы ввели неверный пароль. Пожалуйста, попробуйте еще раз.")
+            msg = bot.send_message(chat_id, "Введите ваш пароль ВКонтакте:")
+            bot.register_next_step_handler(msg, process_password_step, driver)
+        else:
+            # Переход к выбору дальнейшего действия
+            process_next_command(message, driver)
+    else:
+        bot.send_message(
+            chat_id, "Произошла ошибка при попытке ввода пароля. Пожалуйста, попробуйте снова.")
+        msg = bot.send_message(chat_id, "Введите ваш пароль ВКонтакте:")
+        bot.register_next_step_handler(msg, process_password_step, driver)
 
 
 # Установка времени ожидания для всех запросов к API Telegram
